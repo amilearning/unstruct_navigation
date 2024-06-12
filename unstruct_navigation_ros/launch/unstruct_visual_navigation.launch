@@ -1,0 +1,17 @@
+<launch>
+  <!-- Arguments -->
+  <arg name="camera_file"       default="$(find unstruct_navigation_ros)/config/resized_wide_angle_dual.yaml"/>
+  <arg name="params_file"       default="$(find unstruct_navigation_ros)/config/default.yaml"/>  
+
+  <!-- Clear old params -->  
+  <rosparam command="delete" param="unstruct_feature_extractor_node"/>
+
+  <!-- Load parameters -->
+  <rosparam command="load" file="$(arg params_file)" ns="unstruct_feature_extractor_node"/>
+  <rosparam command="load" file="$(arg camera_file)" ns="unstruct_feature_extractor_node"/>
+
+  <node name="unstruct_feature_extractor_node" pkg="unstruct_navigation_ros" type="unstruct_feature_extractor_node.py" output="screen">
+    <param name="reload_default_params" value="False" />
+  </node>
+
+</launch>
