@@ -8,7 +8,6 @@ preprocessed_dir = os.path.join(sim_dir, 'trainingData/preprocessed/')
 eval_dir = os.path.join(sim_dir, 'evaluationData/')
 model_dir = os.path.join(sim_dir, 'models/')
 snapshot_dir = os.path.join(sim_dir, 'snapshot/')
-
 train_log_dir = os.path.join(sim_dir, 'train_log/')
 
 

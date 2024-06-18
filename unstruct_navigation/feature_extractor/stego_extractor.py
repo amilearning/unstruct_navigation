@@ -45,7 +45,6 @@ class FeatureExtractor:
         self._feature_dim = 90
         self._extractor = StegoInterface(
             device=device,
-            input_size=input_size,
             n_image_clusters=kwargs.get("n_image_clusters", 20),
             run_clustering=kwargs.get("run_clustering", True),
             run_crf=kwargs.get("run_crf", False),

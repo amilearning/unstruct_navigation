@@ -66,13 +66,12 @@ class ImageProjector:
         # Compute scaled parameters
         sh = new_h
         sw = new_w if new_w is not None else sh
-        
-        
+
         # Prepare image cropper
         if new_w is None or new_w == new_h:
             self.image_crop = T.Compose([T.Resize(new_h, T.InterpolationMode.NEAREST), T.CenterCrop(new_h)])
         else:
-            self.image_crop = T.Resize([new_h,new_w], T.InterpolationMode.NEAREST)
+            self.image_crop = T.Resize([new_h, new_w], T.InterpolationMode.NEAREST)
 
         # Adjust camera matrix
         # Fill values
@@ -121,30 +120,25 @@ class ImageProjector:
         # Create a new lock
         self.map_lock = threading.Lock()
         
-    def set_camera_pose(self,tran,rot, as_numpy = False):              
-        if as_numpy:
-            self.cam_tran = cp.asarray(tran)
-            self.cam_rot = cp.asarray(quaternion_matrix(rot)[:3, :3])    
-        else:
-            self.cam_tran = cp.asarray([tran.x, tran.y, tran.z])        
-            self.cam_rot = cp.asarray(quaternion_matrix([rot.x, rot.y, rot.z, rot.w])[:3, :3])        
+    def set_camera_pose(self,tran,rot):              
+        self.cam_tran = cp.asarray([tran.x, tran.y, tran.z])        
+        self.cam_rot = cp.asarray(quaternion_matrix([rot.x, rot.y, rot.z, rot.w])[:3, :3])        
 
     def set_camera_info(self,camera_info_msg):
         self.camera_info_msg = camera_info_msg
         self.camera_frame = camera_info_msg.header.frame_id
 
     def get_map_info(self):
-        return torch.as_tensor(self.elev_map_cupy).cuda(), torch.as_tensor(self.grid_center_cupy).cuda()
-    
-                
+        return torch.as_tensor(self.elev_map_cupy), torch.as_tensor(self.grid_center_cupy)
+     
     def set_elev_map(self,elev_map, grid_center):
-        with self.map_lock:
-            self.elev_map_cupy[:] = cp.asarray(elev_map[:]).copy()
+        self.elev_map_cupy[:] = cp.asarray(elev_map[:]).copy()
         # self.elev_map_cupy[:] *= 0.0
         # self.elev_map_cupy = cp.nan_to_num(self.elev_map_cupy,0.0)        
         # self.elev_map_cupy[2,:,:] *=0.0
-        # self.elev_map_cupy[2,:,:] +=1.0        
-            self.grid_center_cupy[:] = cp.asarray(grid_center[:]).copy()
+        # self.elev_map_cupy[2,:,:] +=1.0
+        
+        self.grid_center_cupy[:] = cp.asarray(grid_center[:]).copy()
 
     def init_image_kernel(self,gridmap_info, map_resolution, width_cell_n, height_cell_n, z_tolerance = 0.1):
         self.gridmap_info = gridmap_info
@@ -159,9 +153,8 @@ class ImageProjector:
             np.zeros((2, self.width_cell_n, self.height_cell_n), dtype=np.float32), dtype=np.float32,
         )
         
-        self.elev_map_cupy = cp.zeros((6, self.width_cell_n, self.height_cell_n), dtype=np.float32)
+        self.elev_map_cupy = cp.zeros((3, self.width_cell_n, self.height_cell_n), dtype=np.float32)
         self.grid_center_cupy = cp.zeros((3), dtype=np.float32)
-        
 
         self.img_to_map_kernel = image_to_map_correspondence_kernel(
                 resolution=map_resolution, width=width_cell_n, height=height_cell_n, tolerance_z_collision=z_tolerance,
@@ -194,8 +187,8 @@ class ImageProjector:
             if camera_info_msg is None:
                 camera_info_msg = self.camera_info_msg        
             
-            image_height = self.camera.height.item()
-            image_width = self.camera.width.item()
+            image_height = camera_info_msg.height 
+            image_width = camera_info_msg.width
             assert np.all(np.array(camera_info_msg.D) == 0.0), "Undistortion not implemented"
             K = np.array(camera_info_msg.K, dtype=np.float32).reshape(3, 3)
 
@@ -235,7 +228,7 @@ class ImageProjector:
             
         
             self.img_to_map_kernel(
-                self.elev_map_cupy[:3,:,:],
+                self.elev_map_cupy,
                 x1,
                 y1,
                 z1,
