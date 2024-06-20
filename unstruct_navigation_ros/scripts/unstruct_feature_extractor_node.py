@@ -10,15 +10,18 @@ from unstruct_navigation.cost_evaluator import CostEvaluator
 from unstruct_navigation.feature_extractor import FeatureExtractor
 from unstruct_navigation.cfg import ExperimentParams, RosFeatureExtractorNodeParams
 from unstruct_navigation.image_projector import ImageProjector
-from wild_visual_navigation_msgs.msg import ImageFeatures
+from wild_visual_navigation_msgs.msg import ImageFeatures, Features
+from sensor_msgs.msg import Imu
 from grid_map_msgs.msg import GridMap
-from nav_msgs.msg import Odometry
+from nav_msgs.msg import Odometry, Path
 from ackermann_msgs.msg import AckermannDriveStamped
+import tf.transformations
 import unstruct_navigation_ros.ros_converter as rc
+from unstruct_navigation_ros.ros_converter import torch_tensor_to_ros, ros_to_torch_tensor
 from unstruct_navigation_ros.scheduler import Scheduler
 from unstruct_navigation_ros.reload_rosparams import reload_rosparams
 from unstruct_navigation.utils import MultiModallData, CameraPose, DataSet, create_dir, pickle_write, VehicleState, get_vehicle_state_and_action
-
+from wild_visual_navigation_msgs.msg import TorchTensor
 from dynamic_reconfigure.server import Server
 from unstruct_navigation_ros.cfg import dynConfig
 import cv2
@@ -54,6 +57,11 @@ from copy import deepcopy
 from tf.transformations import euler_from_quaternion, quaternion_matrix
 
 # import matplotlib.pyplot as plt
+from unstruct_navigation.mppi import mppi_offroad
+import yaml
+
+from unstruct_navigation_ros import torch_tensor_to_ros, ros_to_torch_tensor
+
 
 class WvnFeatureExtractor:
     def __init__(self, node_name):
@@ -63,6 +71,7 @@ class WvnFeatureExtractor:
 
         self.action_sampler = ActionFlatSampler(None)
         self.cost_eval = CostEvaluator()
+        self.planner = mppi_offroad()        
 
         # Initialize variables
         self.tf_buffer = tf2_ros.Buffer(cache_time=rospy.Duration(30.0))
@@ -70,18 +79,24 @@ class WvnFeatureExtractor:
 
         self._node_name = node_name
         self._load_model_counter = 0
-
+        
+        self.output_image_mode = 0
+        self.paths_pub_enable = 0
         #tracking variables 
         self.logging_enable = False
         self.msg_update_lock = Lock()
+        self.plan_lock = Lock()
         self.data = []
         self.cur_data = MultiModallData()
         self.cur_odom = None # Odometry()
-        self.cur_cmd = AckermannDriveStamped()                        
+        
+        
         self.cur_cam_pose =  CameraPose()
         self.cur_img_torch = None
-        self.cur_grid_torch = None
+        self.cur_grid_torch = None        
         self.cur_grid_center_torch = None
+        self.cur_img_feature_torch = None
+
 
         # Timers to control the rate of the subscriber
         self._last_checkpoint_ts = rospy.get_time()
@@ -102,6 +117,7 @@ class WvnFeatureExtractor:
             norm_dict = pickle.load(pickle_file)
 
         self.dynpred_model = DynPredModel(cfg= self._params.model.dyn_pred_cfg)
+        
         self.dynpred_model.set_normalizing_constatnt(norm_dict)
         
 
@@ -123,6 +139,8 @@ class WvnFeatureExtractor:
         self.logging_thread = Thread(target=self.logging_thread_loop, name="logging")
         self.logging_thread.start()
 
+        
+        
 
         # Setup verbosity levels
         if self._ros_params.verbose:
@@ -252,14 +270,19 @@ class WvnFeatureExtractor:
             self.grid_callback,
             )
             
-            self.goal = torch.tensor([0.0,0.0]).cuda()
+            
+            
+            self.goal_local = torch.tensor([0.0, 0.0]).cuda()
+            self.goal_global = None
+
             self.goal_sub = rospy.Subscriber(
-            "/move_base_simple/goal",
+            "/grid_cmd",
             PoseStamped,
             self.goal_callback,
             )
             
-
+            self.imu = Imu()
+            self.imu_sub = rospy.Subscriber("/livox/imu", Imu, self.imu_callback)
 
             self.odom_sub = rospy.Subscriber(
             self._ros_params.odom_topic,
@@ -267,6 +290,7 @@ class WvnFeatureExtractor:
             self.odom_callback,
             )
 
+            self.cur_cmd = AckermannDriveStamped()
             self.desired_cmd_sub = rospy.Subscriber(
             self._ros_params.desired_cmd_topic,
             AckermannDriveStamped,
@@ -284,9 +308,28 @@ class WvnFeatureExtractor:
 
             self.dyn_srv = Server(dynConfig, self.dyn_callback)
 
-            self.paths_pub = rospy.Publisher('paths_marker', MarkerArray, queue_size=2)
-            self.opt_path_pub = rospy.Publisher('opt_path_marker', MarkerArray, queue_size=2)
             
+            self.local_path_pub = rospy.Publisher("/local_path", Path, queue_size=2)                    
+            
+            
+        
+        
+
+            self.feature_sub = rospy.Subscriber(
+            "unstruct_features",
+            Features,
+            self.feature_callback,
+            )
+
+
+            # Set publishers
+            self.feature_pub = rospy.Publisher(
+                "unstruct_features",
+                Features,
+                queue_size=2,
+            )
+
+
             # Set publishers
             trav_pub = rospy.Publisher(
                 f"/wild_visual_navigation_node/{cam}/traversability",
@@ -325,23 +368,54 @@ class WvnFeatureExtractor:
                 )
                 self._camera_handler[cam]["imagefeat_pub"] = imagefeat_pub
 
+    def feature_callback(self,msg):
+        features_np = ros_to_torch_tensor(msg)
+        (img_feats, geo_feats, grid_center) = features_np
+       
+        
+        
+
+    def imu_callback(self, imu):
+        self.imu = imu
+
     def goal_callback(self,msg:PoseStamped):
-        self.goal = [msg.pose.position.x , msg.pose.position.y]
-        return 
+        if self.cur_odom is None: 
+            return 
+
+        self.goal_local = torch.tensor([msg.pose.position.x , msg.pose.position.y]).cuda()
+        
+        return  
+    
+    def desired_cmd_callback(self,msg:AckermannDriveStamped):
+        self.cur_cmd = msg
+        
+    def local_goal_to_global_update(self):
+        orientation = self.cur_odom.pose.pose.orientation
+        quaternion = [orientation.x, orientation.y, orientation.z, orientation.w]                    
+        rotation_matrix = quaternion_matrix(quaternion)                    
+        rot_3d = torch.tensor(rotation_matrix[0:3, 0:3]).cuda()                       
+        delta_local = torch.zeros(1, 3).cuda()
+        delta_local[:,:2] = self.goal_local         
+        self.goal_global = torch.matmul( rot_3d.float(), delta_local[..., None]).squeeze() + torch.tensor([self.cur_odom.pose.pose.position.x,self.cur_odom.pose.pose.position.y, self.cur_odom.pose.pose.position.z]).cuda()
+        
     
     
     def dyn_callback(self,config,level):  
         self.logging_enable = config.logging_vehicle_states
+        self.output_image_mode = config.output_image_mode
+        self.paths_pub_enable = config.paths_pub_enable
         if config.clear_buffer:
             self.clear_buffer()
         return config
 
     def odom_callback(self, odom_msg :Odometry):
         self.cur_odom = odom_msg
-      
+           
 
-    def desired_cmd_callback(self,cmd_msg):                
-        self.cur_cmd = cmd_msg
+        
+        
+
+    
         
 
     def query_tf(self, parent_frame: str, child_frame: str, stamp: Optional[rospy.Time] = None):
@@ -496,11 +570,47 @@ class WvnFeatureExtractor:
         delta_local[:,:2] = xs         
         delta_global = torch.matmul( rot_3d.float(), delta_local[..., None]).squeeze()
         cur_odom_xy = torch.tensor([cur_odom.pose.pose.position.x, cur_odom.pose.pose.position.y]).cuda()
-        global_state  = xs + delta_global[:,:2] + cur_odom_xy
+        global_state  =delta_global[:,:2] + cur_odom_xy
         
         return global_state.reshape(-1,n_horizon,2)
 
 
+    def get_path_marker(self, path_tensor,color = [1,0,0, 0.5]):    
+        path_numpy = path_tensor.cpu().numpy() 
+        marker_array_msg = MarkerArray()
+        for batch_idx in range(path_numpy.shape[0]):
+            # Create Marker message for each path
+            marker_msg = Marker()
+            marker_msg.header.frame_id = "map"  # Replace with your frame ID if different
+            marker_msg.header.stamp = rospy.Time.now()
+            marker_msg.ns = "paths"
+            marker_msg.id = batch_idx
+            marker_msg.type = Marker.LINE_STRIP
+            marker_msg.action = Marker.ADD
+            marker_msg.pose.orientation.w = 1.0  # Default orientation
+            # Set scale of the line (optional)
+            marker_msg.scale.x = 0.05  # Line width
+            # Set color (optional, default is blue)
+            marker_msg.color.r = color[0]  # Red
+            marker_msg.color.g = color[1]  # Green
+            marker_msg.color.b = color[2]  # Blue
+            marker_msg.color.a = color[3]  # Alpha (transparency)
+            # Loop through each position in the path tensor
+            for pos_idx in range(path_numpy.shape[1]):  # Assuming tensor shape is [batch, T, 2]
+                x = path_numpy[batch_idx, pos_idx, 0]
+                y = path_numpy[batch_idx, pos_idx, 1]
+                point = Point()
+                point.x = x
+                point.y = y
+                point.z = 0.0  
+                # if pos_idx < path_numpy.shape[1]-2:
+                #     continue
+                marker_msg.points.append(point)
+            marker_array_msg.markers.append(marker_msg)
+        return marker_array_msg
+
+
+ 
 
     @torch.no_grad()
     def image_callback(self, image_msg: Image, cam: str):  # info_msg: CameraInfo
@@ -510,8 +620,8 @@ class WvnFeatureExtractor:
             image_msg (sensor_msgs/Image): Incoming image
             info_msg (sensor_msgs/CameraInfo): Camera info message associated to the image
             cam (str): Camera name
-        """        
-        
+        """   
+    
         start_time = time.time()
         if self.cur_odom is None:
             return 
@@ -521,7 +631,7 @@ class WvnFeatureExtractor:
         
         # Check the rate
         ts = image_msg.header.stamp.to_sec()
-       
+    
         if abs(ts - self._last_image_ts[cam]) < 1.0 / self._ros_params.image_callback_rate:
             return
 
@@ -544,23 +654,17 @@ class WvnFeatureExtractor:
             # Update model from file if possible
             # self.load_model(image_msg.header.stamp)
 
+#################################################  Feature Preprocessing  #################################################                
             # Convert image message to torch image
-            torch_image = rc.ros_image_to_torch(image_msg, device=self._ros_params.device)
-            C, H, W = torch_image.shape
-            
+            torch_image = rc.ros_image_to_torch(image_msg, device=self._ros_params.device)                        
             ################### get Porjected uv given grid map #######
             (tran, rot) = self.query_tf(self.image_projector.camera_frame,self.image_projector.gridmap_info.header.frame_id,image_msg.header.stamp)                    
             self.image_projector.set_camera_pose(tran, rot)
             
-
-            
             if tran is not None:
-                ############## update logging info  ##############                            
-                self.logging_info(tran, rot, torch_image)
-                # if self.logging_enable:                
-                
-                torch_image = self._camera_handler[cam]["image_projector"].resize_image(torch_image)
-                
+                ############## update logging info  ##############                                            
+                self.logging_info(tran, rot, torch_image)                
+                torch_image = self._camera_handler[cam]["image_projector"].resize_image(torch_image)                                          
                 init_del_x = self.cur_odom.pose.pose.position.x - self.cur_grid_center_torch[0]
                 init_del_y = self.cur_odom.pose.pose.position.y - self.cur_grid_center_torch[1]
                 init_del_xy = torch.tensor([init_del_x, init_del_y]).cuda()
@@ -578,83 +682,42 @@ class WvnFeatureExtractor:
                     return_dense_features=True,
                     n_random_pixels=100,
                 )                               
-                
-
+                    
                 img_features_grid = self.get_featuers_on_grid(dense_feat, uv_corresp)                
                 self.inpaint_features(img_features_grid, valid_corresp, init_del_xy)                
-                n_state, n_actions, xs_body_frame, us_body_frame = self.get_dyn_info()   
-
-
-                pred_out = self.dynpred_model(init_del_xy, n_state, n_actions, self.cur_grid_torch, self.cur_grid_center_torch, img_features_grid, valid_corresp)
-                pred_out = self.dynpred_model.output_standardize(pred_out)
-
-#################################################  Cost Evaluation #################################################
-                goal = torch.tensor(self.goal).cuda()
-                nominal_pred_pose_in_global = self.get_pred_pose_in_global(xs_body_frame, self.cur_odom)                             
-                opt_min_index, opt_pred_state = self.cost_eval.geo_plan(self.init_grid_msg.info, self.cur_grid_torch, self.cur_grid_center_torch, nominal_pred_pose_in_global, goal)
-
-                def get_path_msg(path_tensor,color = [1,0,0, 0.5]):    
-                    path_numpy = path_tensor.cpu().numpy() 
-                    marker_array_msg = MarkerArray()
-                    for batch_idx in range(path_numpy.shape[0]):
-                        # Create Marker message for each path
-                        marker_msg = Marker()
-                        marker_msg.header.frame_id = "map"  # Replace with your frame ID if different
-                        marker_msg.header.stamp = rospy.Time.now()
-                        marker_msg.ns = "paths"
-                        marker_msg.id = batch_idx
-                        marker_msg.type = Marker.LINE_STRIP
-                        marker_msg.action = Marker.ADD
-                        marker_msg.pose.orientation.w = 1.0  # Default orientation
-                        # Set scale of the line (optional)
-                        marker_msg.scale.x = 0.05  # Line width
-                        # Set color (optional, default is blue)
-                        marker_msg.color.r = color[0]  # Red
-                        marker_msg.color.g = color[1]  # Green
-                        marker_msg.color.b = color[2]  # Blue
-                        marker_msg.color.a = color[3]  # Alpha (transparency)
-                        # Loop through each position in the path tensor
-                        for pos_idx in range(path_numpy.shape[1]):  # Assuming tensor shape is [batch, T, 2]
-                            x = path_numpy[batch_idx, pos_idx, 0]
-                            y = path_numpy[batch_idx, pos_idx, 1]
-                            point = Point()
-                            point.x = x
-                            point.y = y
-                            point.z = 0.0  
-                            if pos_idx < path_numpy.shape[1]-2:
-                                continue
-                            marker_msg.points.append(point)
-                        marker_array_msg.markers.append(marker_msg)
-                    return marker_array_msg
-                    # marker_array_pub.publish(marker_array_msg)
                 
-                # path_msg = get_path_msg(nominal_pred_pose_in_global[opt_min_index,:2,:].permute(1,0))
-                path_msg = get_path_msg(nominal_pred_pose_in_global[:,:,:],color = [0.0, 0.0, 1.0, 0.5])
-                opt_path_msg = get_path_msg(nominal_pred_pose_in_global[opt_min_index,:,:].unsqueeze(0),color = [1.0, 0.0, 0.0, 1.0])
-                self.opt_path_pub.publish(opt_path_msg)
-                self.paths_pub.publish(path_msg)
+               
+                # self.cur_img_feature_torch = img_features_grid.clone()                                
+                merged_features_tesor= torch.cat([self.cur_grid_torch, img_features_grid],dim=0 )
+                flat_img_features_grid = img_features_grid.reshape(img_features_grid.shape[0],-1)
+                flat_cur_grid_torch = self.cur_grid_torch.reshape(self.cur_grid_torch.shape[0],-1)
                 
-                # # Publish image
+                merged_features_tesor_msg = torch_tensor_to_ros(flat_img_features_grid, flat_cur_grid_torch, self.cur_grid_center_torch, image_msg.header)                
+                self.feature_pub.publish(merged_features_tesor_msg)
+
+                # torch_tensor_to_ros, ros_to_torch_tensor
+
+
                 if self._ros_params.camera_topics[cam]["publish_input_image"]:                    
-###############################################################################################
                 ################## processed image #####################
-                    # input image
-                    # msg = rc.numpy_to_ros_image(
-                    #     (torch_image.permute(1, 2, 0) * 255).cpu().numpy().astype(np.uint8),
-                    #     "rgb8",
-                    # )
-                ################## check UV projected on the image #####################
-                    display_image = torch_image.clone()
-                    display_image[:, valid_uv[1,:], valid_uv[0,:]] = torch.zeros(3, len(valid_uv[0,:]), device='cuda')                                              
-                    display_image[0, valid_uv[1,:], valid_uv[0,:]] +=1.0
-                    image_np = display_image.cpu().numpy()                
-                    image_np = image_np.transpose(1, 2, 0)
-                    # valid grid projection 
-                    msg = rc.numpy_to_ros_image(
-                            (image_np*255).astype(np.uint8),
+                    if self.output_image_mode ==0:
+                        # input image
+                        msg = rc.numpy_to_ros_image(
+                            (torch_image.permute(1, 2, 0) * 255).cpu().numpy().astype(np.uint8),
                             "rgb8",
                         )
-            
+                ################## check UV projected on the image #####################
+                    elif self.output_image_mode ==1:
+                        display_image = torch_image.clone()
+                        display_image[:, valid_uv[1,:], valid_uv[0,:]] = torch.zeros(3, len(valid_uv[0,:]), device='cuda')                                              
+                        display_image[0, valid_uv[1,:], valid_uv[0,:]] +=1.0
+                        image_np = display_image.cpu().numpy()                
+                        image_np = image_np.transpose(1, 2, 0)
+                        # valid grid projection 
+                        msg = rc.numpy_to_ros_image(
+                                (image_np*255).astype(np.uint8),
+                                "rgb8",
+                            )            
                 ################## check the grid #####################
                     # valid = cp.asnumpy(valid_corresp)                
                     # plt.figure(figsize=(8, 8))
@@ -663,43 +726,21 @@ class WvnFeatureExtractor:
                     # plt.ylabel('Y coordinate')
                     # plt.title('Valid Grid Map')
                     # plt.colorbar(label='Validity')
-                    # plt.show()
-                    
+                    # plt.show()                    
                 ################## segmented image #####################                                                            
-                    # msg = rc.numpy_to_ros_image(
-                    #     (10*seg.repeat(3,1,1).permute(1, 2, 0).cpu().numpy()).astype(np.uint8),
-                    #     "rgb8",
-                    # )
+                    elif self.output_image_mode ==2:
+                        msg = rc.numpy_to_ros_image(
+                            (10*seg.repeat(3,1,1).permute(1, 2, 0).cpu().numpy()).astype(np.uint8),
+                            "rgb8",
+                        )
+                    if self.output_image_mode < 3:
 ###############################################################################################
-                    msg.header = image_msg.header
-                    msg.width = torch_image.shape[2]
-                    msg.height = torch_image.shape[1]
-                    self._camera_handler[cam]["input_pub"].publish(msg)
+                        msg.header = image_msg.header
+                        msg.width = torch_image.shape[2]
+                        msg.height = torch_image.shape[1]
+                        self._camera_handler[cam]["input_pub"].publish(msg)
 ###############################################################################################
-          
 
-            # # Publish features and feature_segments
-            # if self._ros_params.camera_topics[cam]["use_for_training"]:
-            #     msg = ImageFeatures()
-            #     msg.header = image_msg.header
-            #     msg.feature_segments = rc.numpy_to_ros_image(seg.cpu().numpy().astype(np.int32), "passthrough")
-            #     msg.feature_segments.header = image_msg.header
-            #     feat_np = feat.cpu().numpy()
-
-            #     mad1 = MultiArrayDimension()
-            #     mad1.label = "n"
-            #     mad1.size = feat_np.shape[0]
-            #     mad1.stride = feat_np.shape[0] * feat_np.shape[1]
-
-            #     mad2 = MultiArrayDimension()
-            #     mad2.label = "feat"
-            #     mad2.size = feat_np.shape[1]
-            #     mad2.stride = feat_np.shape[1]
-
-            #     msg.features.data = feat_np.flatten().tolist()
-            #     msg.features.layout.dim.append(mad1)
-            #     msg.features.layout.dim.append(mad2)
-            #     self._camera_handler[cam]["imagefeat_pub"].publish(msg)
 
         except Exception as e:
             traceback.print_exc()
@@ -709,10 +750,11 @@ class WvnFeatureExtractor:
                 "value": f"failed to execute {e}",
             }
             raise Exception("Error in image callback")
-
-        end_time = time.time()  # End timing
-        elapsed_time = end_time - start_time
-        rospy.loginfo(f"Image callback for {cam} took {elapsed_time:.4f} seconds")
+        
+        if self._ros_params.verbose:
+            end_time = time.time()  # End timing
+            elapsed_time = end_time - start_time
+            rospy.loginfo(f"Image callback for {cam} took {elapsed_time:.4f} seconds")
 
         # Step scheduler
         self._camera_scheduler.step()
@@ -783,8 +825,7 @@ class WvnFeatureExtractor:
                 layers[layer_name] = layer.copy()
                 # if layer_name == "elevation":                    
                 #     elev_layer = layer.copy()
-                #     elev_layer = np.nan_to_num(elev_layer,0.0)            
-
+                #     elev_layer = np.nan_to_num(elev_layer,0.0)        
                 # layers.append(layer)
 
         if self.image_projector.kernel_set is False:
@@ -804,41 +845,11 @@ class WvnFeatureExtractor:
         elev_map_cupy[5,:,:] = np.asarray(layers['traversability_step'])
 
         # elev_map_cupy[2,:,:] = np.ones(layers['elevation'].shape)
+       
         self.image_projector.set_elev_map(elev_map_cupy,grid_center)
 
-        
-        
-        # invalid_mask = np.isnan(layers[0]) 
-        # grid_features = np.array(layers)        
-        # grid_features = np.nan_to_num(grid_features,0.0)
-        
-        # H, W = grid_features[0,:,:].shape
-        
-        # cent = grid_map_msg.info.pose.position
-    
-        # start_x = cent.x - (W // 2) * grid_map_msg.info.resolution
-        # start_y = cent.y - (H // 2) * grid_map_msg.info.resolution
-        # start_z = cent.z
-        # # Create arrays for the x and y coordinates
-        # x_positions = np.linspace(start_x, start_x + (W - 1) * grid_map_msg.info.resolution, W)
-        # y_positions = np.linspace(start_y, start_y + (H - 1) * grid_map_msg.info.resolution, H)
-        # # Create a meshgrid for the x and y positions
-        # xx, yy = np.meshgrid(x_positions, y_positions)
-        # # Combine into a single array of positions
-        # grid_positions = np.stack((xx, yy, np.full_like(xx, start_z)), axis=-1)
-        # grid_positions[:,:,-1] = start_z + elev_layer
-        
-        # self.grid_positions =  grid_positions
-        # self.invalid_mask =  invalid_mask        
-        
-        # quaternion = (
-        #     odom_msg.pose.pose.orientation.x,
-        #     odom_msg.pose.pose.orientation.y,
-        #     odom_msg.pose.pose.orientation.z,
-        #     odom_msg.pose.pose.orientation.w,
-        # )
-        # rpy = euler_from_quaternion(quaternion)
-        # cur_yaw = rpy[2]
+   
+
 
     def logging_thread_loop(self):
         

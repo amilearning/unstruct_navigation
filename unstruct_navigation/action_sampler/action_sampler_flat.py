@@ -21,13 +21,14 @@ class ActionFlatSampler:
     ):  
         self.dir = TrainDir()
         self._cfg = cfg
-        self.dt = 0.2
-        self.T = 2.0
+        self.dt = 0.05
+        self.T = 1.0
         self.steering_max = 0.43
         self.grid_n_rows = 41
         self.grid_n_cols = 41
         self.grid_resolution = 0.25
         self.fov_angle = 90 *np.pi / 180.0
+        self.theta_resolution = np.pi/18
 
         self.x_min = 0.0
         self.x_max = 2.0
@@ -47,6 +48,11 @@ class ActionFlatSampler:
         
         self.load_traj()
 
+    def clip_cmd(self,cmd):
+        cmd[0] = torch.clip(cmd[0], 0.0, self.vel_max)
+        cmd[1] = torch.clip(cmd[1],-self.steering_max, self.steering_max)
+        return cmd
+        
     # Function to take states, inputs and return the flat flag
     def vehicle_flat_forward(self,x, u, params={}):
         # Get the parameter values
@@ -127,6 +133,7 @@ class ActionFlatSampler:
 
     def generate_goals_in_grid(self,y_min, y_max, x_min, x_max, psi_min, psi_max, vel_max):
         
+        
         x_range = np.arange(x_min, x_max, self.grid_resolution)
         y_range = np.arange(y_min, y_max, self.grid_resolution)
         visible_goals = self.get_visible_points(x_range, y_range, fov_angle = 90 *np.pi / 180.0, max_view_distance = 5.0)
@@ -153,14 +160,14 @@ class ActionFlatSampler:
     def find_traj_and_input(self,x0,xf,u0,uf):
         
         
-        dist_to_xf = np.sqrt(xf[0]**2+xf[1]**2)
-        if dist_to_xf < 1.0:
-            Tf = 0.5 # 2*dist_to_xf / abs(uf[0]-u0[0])
-        else:
-            Tf = dist_to_xf / ((u0[0])+1e-3)
-            Tf = np.min([self.T,Tf])
+        # dist_to_xf = np.sqrt(xf[0]**2+xf[1]**2)
+        # if dist_to_xf < 1.0:
+        #     Tf = 0.5 # 2*dist_to_xf / abs(uf[0]-u0[0])
+        # else:
+        #     Tf = dist_to_xf / ((u0[0])+1e-3)
+        #     Tf = np.min([self.T,Tf])
         
-        
+        Tf = self.T
         # TEST: Change the basis to use B-splines
         self.basis = fs.BSplineFamily([0, Tf/2, Tf], 6)
         timepts = np.linspace(0, Tf, int(self.T/self.dt))
@@ -188,7 +195,7 @@ class ActionFlatSampler:
 
         xf_samples, uf_samples = self.generate_goals_in_grid(y_min, y_max, x_min, x_max, psi_min, psi_max, vel_max)
         x0 = [0.,0.,0.]
-        u0 = [cur_vel,0.0]
+        u0 = [cur_vel,cur_vel]
         traj_us = []
         traj_xs = []
         for xf,uf in zip(xf_samples,uf_samples):        

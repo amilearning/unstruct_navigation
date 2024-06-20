@@ -28,5 +28,5 @@ catkin_package(
 
 
 
-catkin_install_python(PROGRAMS  scripts/unstruct_feature_extractor_node.py
+catkin_install_python(PROGRAMS  scripts/unstruct_feature_extractor_node.py scripts/unstruct_planner_node.py
                       DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION})

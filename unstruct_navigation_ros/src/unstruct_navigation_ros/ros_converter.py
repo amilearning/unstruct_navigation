@@ -13,11 +13,86 @@ from liegroups.torch import SO3, SE3
 import numpy as np
 import torch
 import torchvision.transforms as transforms
+import rospy
+from std_msgs.msg import Float32MultiArray
+from std_msgs.msg import MultiArrayDimension
+from wild_visual_navigation_msgs.msg import Features
 
 CV_BRIDGE = CvBridge()
 TO_TENSOR = transforms.ToTensor()
 TO_PIL_IMAGE = transforms.ToPILImage()
 BASE_DIM = 7 + 6  # pose + twist
+
+
+def torch_tensor_to_ros(img_features, geo_features, grid_center_torch, header_):    
+    
+    merged_feats_msg = Features()    
+    merged_feats_msg.header = header_    
+
+## img features
+    img_feat_np = img_features.cpu().numpy()
+    mad1 = MultiArrayDimension()
+    mad1.label = "n"
+    mad1.size = img_feat_np.shape[0]
+    mad1.stride = img_feat_np.shape[0] * img_feat_np.shape[1]
+    mad2 = MultiArrayDimension()
+    mad2.label = "feat"
+    mad2.size = img_feat_np.shape[1]
+    mad2.stride = img_feat_np.shape[1]
+    merged_feats_msg.img_features.data = img_feat_np.flatten().tolist()
+    merged_feats_msg.img_features.layout.dim.append(mad1)
+    merged_feats_msg.img_features.layout.dim.append(mad2)
+
+## geo features
+    geo_feat_np = geo_features.cpu().numpy()
+    geo_mad1 = MultiArrayDimension()
+    geo_mad1.label = "n"
+    geo_mad1.size = geo_feat_np.shape[0]
+    geo_mad1.stride = geo_feat_np.shape[0] * geo_feat_np.shape[1]
+    geo_mad2 = MultiArrayDimension()
+    geo_mad2.label = "feat"
+    geo_mad2.size = geo_feat_np.shape[1]
+    geo_mad2.stride = geo_feat_np.shape[1]
+    merged_feats_msg.grid_features.data = geo_feat_np.flatten().tolist()
+    merged_feats_msg.grid_features.layout.dim.append(geo_mad1)
+    merged_feats_msg.grid_features.layout.dim.append(geo_mad2)
+
+    merged_feats_msg.grid_center = grid_center_torch.cpu().numpy().tolist()
+    
+    return merged_feats_msg
+
+
+
+def ros_to_torch_tensor(feats_msg):
+
+## img features
+    ma = feats_msg.img_features
+    dims = tuple(map(lambda x: x.size, ma.layout.dim))
+    img_feats =  torch.from_numpy(
+        np.array(ma.data, dtype=float).reshape(dims).astype(np.float32)
+    ).to("cuda")
+    # TODO: currently only the grid with same width and height is assumed 
+    width_n = int(np.sqrt(img_feats.shape[-1]))
+    height_n = width_n
+    img_feats = img_feats.reshape(img_feats.shape[0], width_n,height_n)
+
+## geo features
+    grid_ma = feats_msg.grid_features
+    dims = tuple(map(lambda x: x.size, grid_ma.layout.dim))
+    geo_feats =  torch.from_numpy(
+        np.array(grid_ma.data, dtype=float).reshape(dims).astype(np.float32)
+    ).to("cuda")
+    # TODO: currently only the grid with same width and height is assumed 
+    width_n = int(np.sqrt(geo_feats.shape[-1]))
+    height_n = width_n
+    geo_feats = geo_feats.reshape(geo_feats.shape[0], width_n,height_n)
+
+## grid_center
+    grid_center = torch.tensor(feats_msg.grid_center).cuda()
+
+    return (img_feats, geo_feats, grid_center)
+    
+
 
 
 def robot_state_to_torch(robot_state, device="cpu"):
@@ -226,3 +301,5 @@ def torch_to_ros_pose(torch_pose):
     pose.position.z = t[2]
 
     return pose
+
+

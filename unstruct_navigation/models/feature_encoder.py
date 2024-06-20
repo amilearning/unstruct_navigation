@@ -181,7 +181,14 @@ class DynPredModel(nn.Module):
     def output_standardize(self,out):
         #  TODO: currently only the one step is normalzied 
         assert self.norm_dict['output_mean'] is not None
-        return self.standardize(out, self.norm_dict['output_mean'][0,:], self.norm_dict['output_std'][0,:])
+        if len(out.shape) ==3:
+            flat_out = out.reshape(-1,out.shape[-1])
+            flat_out = out.reshape(-1,out.shape[-1])
+            flat_out_normalized = self.standardize(flat_out, self.norm_dict['output_mean'][0,:], self.norm_dict['output_std'][0,:])
+            flat_out_normalized = flat_out_normalized.reshape(out.shape)
+        else:
+            flat_out_normalized = self.standardize(out, self.norm_dict['output_mean'][0,:], self.norm_dict['output_std'][0,:])
+        return flat_out_normalized
             
         
 
@@ -213,59 +220,13 @@ class DynPredModel(nn.Module):
         conv_output = model(dummy_input)
         return conv_output.view(-1).size(0)
     
-    def pred_from_single_image(self,input_bag):
-        
-        xhat, image = input_bag
-        batch_size = xhat.shape[0]
-        seq_size = xhat.shape[1]
-        single_image_features = self.image_conv(image.unsqueeze(dim=0))
-        image_features = single_image_features.repeat(batch_size,1,1,1)
-        image_features = image_features.view(batch_size,-1)
-        
-        # image_features = self.image_fc(image_features)
-
-        # image_features = image_features.unsqueeze(1).expand(-1, pred_pose_residual.shape[1], -1)
-        att_img_featurs = torch.zeros(xhat.shape).to(self.gpu_id).float()
-        for i in range(seq_size):
-            Qry = image_features.unsqueeze(dim=-1).clone()            
-            att_key = self.input_to_image_ff(xhat[:,i,:]).unsqueeze(dim=-1)
-            att_weight = torch.softmax(Qry@att_key.transpose(-2,-1)/math.sqrt(Qry.size(-1)), dim=-1)
-            att_features = (att_weight @ Qry).squeeze()
-                # Qry @ att_key / math.sqrt(att_key.shape[-1])            
-            att_features = self.image_fc(att_features)
-            att_img_featurs[:,i,:] = att_features.clone()
-
-        lstm_input = torch.cat((att_img_featurs,xhat),dim=2)
-        
-
-        h0 = torch.zeros(self.auc_lstm.num_layers, batch_size, self.auc_lstm_hidden_size).to(self.gpu_id).float()
-        c0 = torch.zeros(self.auc_lstm.num_layers, batch_size, self.auc_lstm_hidden_size).to(self.gpu_id).float()        
-        output, (h,c) = self.auc_lstm(lstm_input,(h0,c0))
-
-        # augmented_output = torch.zeros(output.shape[0],output.shape[1]-1,output.shape[2]).to(self.gpu_id).float() 
-        # for i in range(seq_size-1):
-        #     augmented_output[:,i,:] = torch.tanh(output[:,1+i,:])*2 + 2*i
-
-        
-        # output_flatten = augmented_output.reshape(batch_size,-1)
-        output_flatten = output.reshape(batch_size,-1)
-        dir_pred = self.test_fc(output_flatten)
-        
-        aug_pred = dir_pred.reshape(dir_pred.shape[0],-1,5)
-        temporal_encoding = torch.ones(aug_pred.shape[0], aug_pred.shape[1], 1).to(self.gpu_id).float() 
-        for i in range(seq_size-1):
-            temporal_encoding[:,i,:] = i
-        aug_pred = torch.cat((aug_pred, temporal_encoding), dim =2)
-     
-        return aug_pred
-
-        
+    def forward(self,cur_odom, n_state, n_actions, grid, grid_center, img_features_grid):
+          
+        init_del_x = cur_odom.pose.pose.position.x - grid_center[0]
+        init_del_y = cur_odom.pose.pose.position.y - grid_center[1]
+        init_del_xy = torch.tensor([init_del_x, init_del_y]).cuda()
     
-    def forward(self,init_del_xy, n_state, n_actions, grid, grid_center, img_features_grid, valid_corresp):
-        ''' 
-        
-        '''
-      
+
         grid[torch.isnan(grid)] = 0
         half_map_length = self.input_grid_width*self.input_grid_resolution/2.0
         
@@ -282,8 +243,7 @@ class DynPredModel(nn.Module):
         if self.training:
             pose_grid = init_del_xy.unsqueeze(1).unsqueeze(1)/half_map_length            
             pose_features = F.grid_sample(refined_features, pose_grid,align_corners=True)                 
-        else:
-            ## TODO: need to implement multi step prediciton, curerntly just repeating for loop for checking the computation time.
+        else:            
             pose_grid = init_del_xy.view(1,1,1,-1)/half_map_length            
             pose_features = F.grid_sample(refined_features, pose_grid,align_corners=True)                 
             pose_features = pose_features.repeat(n_state.shape[0],1,1,1)
@@ -305,9 +265,15 @@ class DynPredModel(nn.Module):
         for i in range(1,self.n_time_step-1):
             roll_del_xy = out[:,:2]
             roll_n_state = out[:,2:]
-            roll_actions = n_actions[:,i,:]            
-            roll_grid_xy = roll_del_xy.unsqueeze(1).unsqueeze(1)/half_map_length 
-            roll_features = F.grid_sample(refined_features, roll_grid_xy,align_corners=True)                             
+            roll_actions = n_actions[:,i,:]    
+            if self.training:        
+                roll_grid_xy = roll_del_xy.unsqueeze(1).unsqueeze(1)/half_map_length 
+                roll_features = F.grid_sample(refined_features, roll_grid_xy,align_corners=True)                             
+            else:
+                roll_grid_xy = roll_del_xy.unsqueeze(1).unsqueeze(0)/half_map_length            
+                roll_features = F.grid_sample(refined_features, roll_grid_xy,align_corners=True).squeeze()                 
+                roll_features = roll_features.permute(1,0)                
+
             roll_dynamic_state = torch.hstack([roll_n_state, roll_actions])        
             roll_merged_feature = torch.cat((roll_features.squeeze(),roll_dynamic_state),dim =1).to(torch.float32)
             out = self.mergelayer(roll_merged_feature)
@@ -316,7 +282,7 @@ class DynPredModel(nn.Module):
 
             roll_state_history.append(out)
         
-        return roll_state_history
+        return torch.stack(roll_state_history)
     
 #    output[i,:] = torch.tensor([del_x, del_y, vx,vy,vz, wx,wy,wz,roll,pitch,yaw])
 
