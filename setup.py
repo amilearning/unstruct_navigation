@@ -17,7 +17,8 @@ INSTALL_REQUIRES = [
     "termcolor",
     "pydensecrf@git+https://github.com/lucasb-eyer/pydensecrf.git",    
     "wget",    
-    "wandb"
+    "wandb",
+    "pyquaternion"
 ]
 setup(
     name="unstruct_navigation",

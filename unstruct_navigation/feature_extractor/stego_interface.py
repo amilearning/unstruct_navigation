@@ -20,7 +20,7 @@ class StegoInterface:
         self,
         device: str,
         input_size: int = 448,
-        model_path: str = f"/home/offroad/data/models/epoch=2-step=1200.ckpt",
+        model_path: str = f"/home/stego_ws/models/epoch=2-step=1200.ckpt",
         n_image_clusters: int = 40,
         run_crf: bool = False,
         run_clustering: bool = False,
@@ -140,7 +140,7 @@ def run_stego_interfacer():
     from wild_visual_navigation.visu import get_img_from_fig
     from wild_visual_navigation.utils.testing import load_test_image, make_results_folder
     from unsup_seg.utils import remove_axes
-    import matplotlib.pyplot as plt
+    # import matplotlib.pyplot as plt
 
     # Create test directory
     outpath = make_results_folder("test_stego_interfacer")

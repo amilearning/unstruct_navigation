@@ -7,7 +7,7 @@ log_buffer_size: 10
 logging_enable: True
 sampling_rate: 5
 
-train_data_dir: "/home/offroad/data/train_data"
+train_data_dir: "/home/stego_ws/data/train_data"
 
 # Relevant frames
 fixed_frame: odom
@@ -43,8 +43,8 @@ mission_name: "test"                # Name of the mission_folder used for loggin
 mission_timestamp: True             # If true current timestamp is used as a prefix for the mission_folder
 
 # Threads
-image_callback_rate: 10             # Maximum rate at which images are processed in hertz
-supervision_callback_rate: 10       # Maximum rate at which supervision_signals are processed in hertz
+image_callback_rate: 15             # Maximum rate at which images are processed in hertz
+supervision_callback_rate: 15       # Maximum rate at which supervision_signals are processed in hertz
 learning_thread_rate: 10            # Gradient steps per second in hertz
 logging_thread_rate: 2              # Logging of learning_node in hertz
 status_thread_rate: 0.5             # Status of feature_extractor_node in hertz
@@ -60,5 +60,5 @@ print_image_callback_time: false
 print_supervision_callback_time: false
 log_time: false
 log_confidence: false
-verbose: true
+verbose: false
 extraction_store_folder:  "nan"

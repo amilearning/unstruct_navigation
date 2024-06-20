@@ -41,27 +41,8 @@ from std_msgs.msg import ColorRGBA
 from geometry_msgs.msg import Point
 import tf
 import cv2
-from gazebo_msgs.msg import ModelState, ModelStates
 
-def gen_random_model_state(odom = None):        
 
-    new_model = ModelState()
-    new_model.model_name = 'Alpha'        
-    map_x_max = 15.0
-    map_y_max = 15.0
-    new_pose = np.random.rand(3,1) 
-    new_model.pose.position.x = new_pose[0] *map_x_max*2- map_x_max 
-    new_model.pose.position.y = new_pose[1]*map_y_max*2- map_y_max
-    new_model.pose.position.z = 0.5                  
-    quat = euler_to_quaternion(0, 0, new_pose[2])
-    new_model.pose.orientation.w = quat[0]
-    new_model.pose.orientation.x = quat[1]
-    new_model.pose.orientation.y = quat[2]
-    new_model.pose.orientation.z = quat[3]
-    if odom is not None:
-        new_model.pose = odom.pose.pose             
-
-    return new_model 
 
 
 def normalize_depth(depth):    

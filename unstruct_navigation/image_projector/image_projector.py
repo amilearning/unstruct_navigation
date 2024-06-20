@@ -20,6 +20,7 @@ import cupy as cp
 import string
 from unstruct_navigation.image_projector import ( image_to_map_correspondence_kernel )
 import threading
+import pickle 
 
 
 
@@ -108,6 +109,18 @@ class ImageProjector:
         
 
 
+    def __getstate__(self):
+        state = self.__dict__.copy()
+        # Remove the unpicklable 'lock' entry
+        del state['map_lock']
+        return state
+    
+
+    def __setstate__(self, state):
+        self.__dict__.update(state)
+        # Create a new lock
+        self.map_lock = threading.Lock()
+    
     def set_camera_pose(self,tran,rot):              
         self.cam_tran = cp.asarray([tran.x, tran.y, tran.z])        
         self.cam_rot = cp.asarray(quaternion_matrix([rot.x, rot.y, rot.z, rot.w])[:3, :3])        

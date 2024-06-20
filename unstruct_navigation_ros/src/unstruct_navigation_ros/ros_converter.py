@@ -7,14 +7,14 @@ import cv2
 from geometry_msgs.msg import Pose
 from nav_msgs.msg import Odometry
 from sensor_msgs.msg import Image, CompressedImage
-from cv_bridge import CvBridge
+
 import sys
 from liegroups.torch import SO3, SE3
 import numpy as np
 import torch
 import torchvision.transforms as transforms
 
-CV_BRIDGE = CvBridge()
+
 TO_TENSOR = transforms.ToTensor()
 TO_PIL_IMAGE = transforms.ToPILImage()
 BASE_DIM = 7 + 6  # pose + twist

@@ -176,8 +176,9 @@ class WvnFeatureExtractor:
             # Camera info
             t = self._ros_params.camera_topics[cam]["info_topic"]
             rospy.loginfo(f"[{self._node_name}] Waiting for camera info topic {t}")
-            camera_info_msg = rospy.wait_for_message(self._ros_params.camera_topics[cam]["info_topic"], CameraInfo)
+            camera_info_msg = rospy.wait_for_message(self._ros_params.camera_topics[cam]["info_topic"], CameraInfo)            
             rospy.loginfo(f"[{self._node_name}] Done")
+            self.init_camera_info_msg = deepcopy(camera_info_msg)
             
             K, H, W = rc.ros_cam_info_to_tensors(camera_info_msg, device=self._ros_params.device)
 
@@ -436,84 +437,75 @@ class WvnFeatureExtractor:
             ################### get Porjected uv given grid map #########################################################
             (tran, rot) = self.query_tf(self.image_projector.camera_frame,self.image_projector.gridmap_info.header.frame_id,image_msg.header.stamp)        
             
-            ############## update logging info 
+            ############## update logging info  ######################################################################                 
             if self.logging_enable:
                 self.cur_cam_pose.update(tran,rot)
                 self.cur_img_torch = torch_image
                 self.cur_grid_torch, self.cur_grid_center_torch = self.image_projector.get_map_info()
-            ############## update logging info 
+            ############## update logging info END ######################################################################                 
+            else:                
+                self.image_projector.set_camera_pose(tran, rot)
+                if tran is not None:
+                    uv_corresp, valid_corresp = self.image_projector.input_image(cp.asarray(torch_image))
+                    if len(valid_corresp[valid_corresp==False]) == 0:
+                        return
+                    valid_uv  = torch.as_tensor(uv_corresp[:,valid_corresp]).long()
+                ################### get Porjected uv given grid map END #########################################################
+                #################################################################################################################
+
+                    # Extract features
+                    _, feat, seg, center, dense_feat = self._feature_extractor.extract(
+                        img=torch_image[None],
+                        return_centers=False,
+                        return_dense_features=True,
+                        n_random_pixels=100,
+                    )
                 
+                    feat_on_grid = dense_feat[:,:,valid_uv[1,:],valid_uv[0,:]]
 
-            self.image_projector.set_camera_pose(tran, rot)
-            if tran is not None:
-                uv_corresp, valid_corresp = self.image_projector.input_image(cp.asarray(torch_image))
-                if len(valid_corresp[valid_corresp==False]) == 0:
-                    return
-                valid_uv  = torch.as_tensor(uv_corresp[:,valid_corresp]).long()
-            ################### get Porjected uv given grid map END #########################################################
-            #################################################################################################################
-
-                # Extract features
-                _, feat, seg, center, dense_feat = self._feature_extractor.extract(
-                    img=torch_image[None],
-                    return_centers=False,
-                    return_dense_features=True,
-                    n_random_pixels=100,
-                )
-               
-                feat_on_grid = dense_feat[:,:,valid_uv[1,:],valid_uv[0,:]]
-
-            # msg = rc.numpy_to_ros_image(out_trav.cpu().numpy(), "passthrough")
-            # msg.header = image_msg.header
-            # msg.width = out_trav.shape[0]
-            # msg.height = out_trav.shape[1]
-            # self._camera_handler[cam]["trav_pub"].publish(msg)
-
-       
-
-                # # Publish image
-                if self._ros_params.camera_topics[cam]["publish_input_image"]:                    
-###############################################################################################
-                ################## processed image #####################
-                    ## input image
-                    # msg = rc.numpy_to_ros_image(
-                    #     (torch_image.permute(1, 2, 0) * 255).cpu().numpy().astype(np.uint8),
-                    #     "rgb8",
-                    # )
-                ################## check UV projected on the image #####################
-                    display_image = torch_image.clone()
-                    display_image[:, valid_uv[1,:], valid_uv[0,:]] = torch.zeros(3, len(valid_uv[0,:]), device='cuda')                                              
-                    display_image[0, valid_uv[1,:], valid_uv[0,:]] +=1.0
-                    image_np = display_image.cpu().numpy()                
-                    image_np = image_np.transpose(1, 2, 0)
-                    # valid grid projection 
-                    msg = rc.numpy_to_ros_image(
-                            (image_np*255).astype(np.uint8),
-                            "rgb8",
-                        )
+                    # # Publish image
+                    if self._ros_params.camera_topics[cam]["publish_input_image"]:                    
+    ###############################################################################################
+                    ################## processed image #####################
+                        ## input image
+                        # msg = rc.numpy_to_ros_image(
+                        #     (torch_image.permute(1, 2, 0) * 255).cpu().numpy().astype(np.uint8),
+                        #     "rgb8",
+                        # )
+                    ################## check UV projected on the image #####################
+                        display_image = torch_image.clone()
+                        display_image[:, valid_uv[1,:], valid_uv[0,:]] = torch.zeros(3, len(valid_uv[0,:]), device='cuda')                                              
+                        display_image[0, valid_uv[1,:], valid_uv[0,:]] +=1.0
+                        image_np = display_image.cpu().numpy()                
+                        image_np = image_np.transpose(1, 2, 0)
+                        # valid grid projection 
+                        msg = rc.numpy_to_ros_image(
+                                (image_np*255).astype(np.uint8),
+                                "rgb8",
+                            )
+                
+                    ################## check the grid #####################
+                        # valid = cp.asnumpy(valid_corresp)                
+                        # plt.figure(figsize=(8, 8))
+                        # plt.imshow(valid, cmap='gray', interpolation='none')
+                        # plt.xlabel('X coordinate')
+                        # plt.ylabel('Y coordinate')
+                        # plt.title('Valid Grid Map')
+                        # plt.colorbar(label='Validity')
+                        # plt.show()
+                        
+                    ################## segmented image #####################                                                            
+                        # msg = rc.numpy_to_ros_image(
+                        #     (10*seg.repeat(3,1,1).permute(1, 2, 0).cpu().numpy()).astype(np.uint8),
+                        #     "rgb8",
+                        # )
+    ###############################################################################################
+                        msg.header = image_msg.header
+                        msg.width = torch_image.shape[1]
+                        msg.height = torch_image.shape[2]
+                        self._camera_handler[cam]["input_pub"].publish(msg)
+    ###############################################################################################
             
-                ################## check the grid #####################
-                    # valid = cp.asnumpy(valid_corresp)                
-                    # plt.figure(figsize=(8, 8))
-                    # plt.imshow(valid, cmap='gray', interpolation='none')
-                    # plt.xlabel('X coordinate')
-                    # plt.ylabel('Y coordinate')
-                    # plt.title('Valid Grid Map')
-                    # plt.colorbar(label='Validity')
-                    # plt.show()
-                    
-                ################## segmented image #####################                                                            
-                    # msg = rc.numpy_to_ros_image(
-                    #     (10*seg.repeat(3,1,1).permute(1, 2, 0).cpu().numpy()).astype(np.uint8),
-                    #     "rgb8",
-                    # )
-###############################################################################################
-                    msg.header = image_msg.header
-                    msg.width = torch_image.shape[1]
-                    msg.height = torch_image.shape[2]
-                    self._camera_handler[cam]["input_pub"].publish(msg)
-###############################################################################################
-          
 
             # # Publish features and feature_segments
             # if self._ros_params.camera_topics[cam]["use_for_training"]:
@@ -625,6 +617,7 @@ class WvnFeatureExtractor:
                 # layers.append(layer)
 
         if self.image_projector.kernel_set is False:
+            self.init_grid_msg = deepcopy(grid_map_msg)
             self.image_projector.init_image_kernel(grid_map_msg.info, map_resolution = grid_map_msg.info.resolution, width_cell_n=n_cols, height_cell_n=n_rows)
 
          
@@ -716,10 +709,11 @@ class WvnFeatureExtractor:
         if len(self.data) ==0:
             return        
         self.data_saving = True
-        real_data = DataSet(len(self.data), self.data.copy())        
+        rospy.loginfo("Save start ")                        
+        real_data = DataSet(len(self.data), self.data.copy(),self.init_grid_msg, self.init_camera_info_msg)        
         create_dir(path=self._ros_params.train_data_dir)        
         pickle_write(real_data, os.path.join(self._ros_params.train_data_dir, str(rospy.Time.now().to_sec()) + '_'+ str(len(self.data))+'.pkl'))
-        rospy.loginfo("states data saved")        
+        rospy.loginfo("states data saved")                
         self.clear_buffer()
         self.data_saving = False
 

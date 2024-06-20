@@ -10,6 +10,7 @@ from tf.transformations import euler_from_quaternion
 from unstruct_navigation.utils import get_local_vel
 from typing import List
 from ackermann_msgs.msg import AckermannDriveStamped
+from grid_map_msgs.msg import GridMap
 
 @dataclass
 class PythonMsg:
@@ -248,4 +249,5 @@ class MultiModallData(PythonMsg):
 class DataSet():    
     N: int
     items: List[MultiModallData]
-    
+    init_grid_msg: GridMap = field(default=None)
+    init_cam_info_msg: CameraInfo = field(default=None)    
