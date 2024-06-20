@@ -11,7 +11,6 @@ from unstruct_navigation.utils import get_local_vel
 from typing import List
 from ackermann_msgs.msg import AckermannDriveStamped
 from grid_map_msgs.msg import GridMap
-
 @dataclass
 class PythonMsg:
    

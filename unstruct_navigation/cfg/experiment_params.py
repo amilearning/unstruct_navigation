@@ -105,6 +105,23 @@ class ExperimentParams:
         name: str = "SimpleMLP"  # LinearRnvp, SimpleMLP, SimpleGCN, DoubleMLP
         load_ckpt: Optional[str] = None
 
+
+        @dataclass
+        class DynPredModelCfgParams:
+            input_size: int = 90  # 90 for stego, 384 for dino
+            input_grid_resolution: float = 0.25
+            input_grid_width: int = 41
+            input_grid_height: int = 41
+            input_state_dim: int = 9
+            input_action_dim: int = 2
+            n_time_step: int = 10
+            img_feature_dim: int = 90
+            geo_feature_dim: int = 6
+            output_dim: int = 11
+            hidden_sizes: List[int] = field(default_factory=lambda: [256, 32, 1])
+            reconstruction: bool = True
+        dyn_pred_cfg: DynPredModelCfgParams = DynPredModelCfgParams()
+        
         @dataclass
         class SimpleMlpCfgParams:
             input_size: int = 90  # 90 for stego, 384 for dino

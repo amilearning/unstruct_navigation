@@ -28,6 +28,6 @@
 # )
 # from .loss import TraversabilityLoss, AnomalyLoss
 # from .testing import load_test_image, get_dino_transform, make_results_folder
-from .utils import get_local_vel
+from .utils import get_local_vel, get_vehicle_state_and_action
 from .ptypes import MultiModallData, VehicleState, CameraPose, DataSet
 from .file_utils import create_dir, pickle_write

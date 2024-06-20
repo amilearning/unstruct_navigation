@@ -9,6 +9,8 @@ from .ros_converter import (
     ros_pose_to_torch,
     ros_tf_to_torch,
     ros_image_to_torch,
+    torch_tensor_to_ros,
+    ros_to_torch_tensor
 )
 from .scheduler import Scheduler
 from .reload_rosparams import reload_rosparams

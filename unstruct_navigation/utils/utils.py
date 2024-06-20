@@ -30,7 +30,6 @@
 """
 
 
-
 import math
 import pyquaternion
 import numpy as np
@@ -41,9 +40,49 @@ from std_msgs.msg import ColorRGBA
 from geometry_msgs.msg import Point
 import tf
 import cv2
+from gazebo_msgs.msg import ModelState, ModelStates
 
 
 
+def get_vehicle_state_and_action(cur_state):    
+    '''     
+     vx, vy, vz, wx, wy, wz, roll, pitch, yaw (9), vcmd, steering    
+    '''
+    vx = cur_state.local_twist.linear.x
+    vy = cur_state.local_twist.linear.y
+    vz = cur_state.local_twist.linear.z
+    wx = cur_state.local_twist.angular.x
+    wy = cur_state.local_twist.angular.y
+    wz = cur_state.local_twist.angular.z
+    roll = cur_state.euler.roll
+    pitch = cur_state.euler.pitch
+    yaw = cur_state.euler.yaw
+    in_vehicle_state = torch.tensor([ vx,vy,vz, wx,wy,wz,roll,pitch,yaw])
+    action_state = torch.tensor([cur_state.u.vcmd, cur_state.u.steer])
+
+    return in_vehicle_state, action_state
+
+
+
+def gen_random_model_state(odom = None):        
+
+    new_model = ModelState()
+    new_model.model_name = 'Alpha'        
+    map_x_max = 15.0
+    map_y_max = 15.0
+    new_pose = np.random.rand(3,1) 
+    new_model.pose.position.x = new_pose[0] *map_x_max*2- map_x_max 
+    new_model.pose.position.y = new_pose[1]*map_y_max*2- map_y_max
+    new_model.pose.position.z = 0.5                  
+    quat = euler_to_quaternion(0, 0, new_pose[2])
+    new_model.pose.orientation.w = quat[0]
+    new_model.pose.orientation.x = quat[1]
+    new_model.pose.orientation.y = quat[2]
+    new_model.pose.orientation.z = quat[3]
+    if odom is not None:
+        new_model.pose = odom.pose.pose             
+
+    return new_model 
 
 def normalize_depth(depth):    
     depth = np.clip(depth,0.0, 16.0) 
@@ -585,3 +624,24 @@ def get_attented_img_given_aucData(target_poses, auc_data, camera_info):
     depth_imgs = depth_imgs[:,np.newaxis]
     
     return color_imgs, depth_imgs
+
+def get_path_msg_from_tensor(path_tensor, path_msg):
+     # Create a Path message    
+    path_msg.header.frame_id = "map"  # Replace with your frame ID if different
+
+    # Loop through each position in the tensor
+    for i in range(path_tensor.shape[1]):  # Assuming tensor shape is [2, 10]
+        x = path_tensor[0, i]
+        y = path_tensor[1, i]
+
+        # Create a PoseStamped message
+        pose = PoseStamped()
+        pose.header.frame_id = path_msg.header.frame_id
+        pose.header.stamp = rospy.Time.now()
+
+        # Set position (x, y) in the PoseStamped message
+        pose.pose.position = Point(x, y, 0.0)  # Assuming z = 0 for 2D path
+
+        # Append the PoseStamped message to the Path message
+        path_msg.poses.append(pose)
+    return path_msg

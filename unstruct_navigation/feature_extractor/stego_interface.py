@@ -19,8 +19,9 @@ class StegoInterface:
     def __init__(
         self,
         device: str,
-        input_size: int = 448,
-        model_path: str = f"/home/stego_ws/models/epoch=2-step=1200.ckpt",
+        input_size_height: int = 184,
+        input_size_width: int = 336,
+        model_path: str = f"/home/stego_ws/models/epoch=9-step=390.ckpt",
         n_image_clusters: int = 40,
         run_crf: bool = False,
         run_clustering: bool = False,
@@ -31,7 +32,8 @@ class StegoInterface:
             self._cfg = OmegaConf.create(
                 {
                     "model_path": model_path,
-                    "input_size": input_size,
+                    "input_size_height": input_size_height,
+                    "input_size_width": input_size_width,
                     "run_crf": run_crf,
                     "run_clustering": run_clustering,
                     "n_image_clusters": n_image_clusters,
@@ -49,10 +51,11 @@ class StegoInterface:
 
         # Other
         normalization = T.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
+        res = [input_size_height, input_size_width]   
         self._transform = T.Compose(
             [
-                T.Resize(input_size, T.InterpolationMode.NEAREST),
-                T.CenterCrop(input_size),
+                T.Resize(res, T.InterpolationMode.NEAREST),
+                T.CenterCrop(res),
                 normalization,
             ]
         )
@@ -101,8 +104,10 @@ class StegoInterface:
 
         # resize and interpolate features
         # with Timer("interpolate output"):
-        B, D, H, W = img.shape
-        new_features_size = (H, H)
+        # B, D, H, W = img.shape
+        B, D, H, W = resized_img.shape
+        new_features_size = (H, W)
+        # new_features_size = (H, H)
         # pad = int((W - H) / 2)
         self._code = F.interpolate(self._code, new_features_size, mode="bilinear", align_corners=True)
         self._cluster_pred = F.interpolate(self._cluster_pred[None].float(), new_features_size, mode="nearest").int()

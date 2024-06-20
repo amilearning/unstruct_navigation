@@ -24,8 +24,8 @@ robot_height: 0.3
 traversability_radius: 3.0          # Maximum distance in meters of the supervision graph
 image_graph_dist_thr: 0.2           # Minimum distance between mission nodes being added
 supervision_graph_dist_thr: 0.1     # Minimum distance between supervision nodes being added
-network_input_image_height: 224     # Unput image height
-network_input_image_width: 224      # Input image width
+network_input_image_height: 184     # Unput image height
+network_input_image_width: 336      # Input image width
 segmentation_type: "stego"          # Options: slic, grid, random, stego
 feature_type: "stego"               # Options: dino, dinov2, stego
 dino_patch_size: 8                  # Options: 8, 16; We found 8 is sufficient and faster
@@ -43,8 +43,8 @@ mission_name: "test"                # Name of the mission_folder used for loggin
 mission_timestamp: True             # If true current timestamp is used as a prefix for the mission_folder
 
 # Threads
-image_callback_rate: 15             # Maximum rate at which images are processed in hertz
-supervision_callback_rate: 15       # Maximum rate at which supervision_signals are processed in hertz
+image_callback_rate: 5             # Maximum rate at which images are processed in hertz
+supervision_callback_rate: 10       # Maximum rate at which supervision_signals are processed in hertz
 learning_thread_rate: 10            # Gradient steps per second in hertz
 logging_thread_rate: 2              # Logging of learning_node in hertz
 status_thread_rate: 0.5             # Status of feature_extractor_node in hertz
@@ -60,5 +60,5 @@ print_image_callback_time: false
 print_supervision_callback_time: false
 log_time: false
 log_confidence: false
-verbose: false
+verbose: true
 extraction_store_folder:  "nan"
