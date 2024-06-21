@@ -15,6 +15,7 @@ class MPPI(torch.nn.Module):
 
     def __init__(
         self,
+        Predmodel,
         Dynamics,
         Costs,
         Sampling,
@@ -31,6 +32,8 @@ class MPPI(torch.nn.Module):
         :param u_init: (nu) what to initialize new end of trajectory control to be; defeaults to zero
         """
         super(MPPI, self).__init__()
+        self.data_logging = False
+        self.Predmodel = Predmodel
         self.d = device
         self.dtype = torch.float
         self.K = MPPI_config["ROLLOUTS"]
@@ -43,6 +46,7 @@ class MPPI(torch.nn.Module):
         self.Sampling = Sampling
 
         self.U = torch.zeros((self.T, self.Sampling.nu), dtype=self.dtype).to(self.d)
+
 
     @torch.jit.export
     def reset(self):
@@ -88,11 +92,27 @@ class MPPI(torch.nn.Module):
         ## M bins per control traj, K control trajectories, T timesteps, NX states
         ## update all the states using the dynamics function
         states = self.Dynamics.forward(states, controls)
+        
+        # # n_state, n_actions = self.dynpred_model.input_normalization(batch_state_.cuda(),batch_action_.cuda())
+        if self.data_logging:
+            cost_total = torch.nan_to_num(
+                self.Costs.forward(states, controls) + perturbation_cost, nan=1000.0
+            )
+            controls, self.U = self.Sampling.update_control(cost_total, self.U, _state)            
+            
+        else:
+            # n_controls = self.Predmodel.normalize_actions(controls)
+            pred_outs = self.Predmodel(controls)
+
+            cost_total = torch.nan_to_num(
+                self.Costs.forward(states, controls) + perturbation_cost, nan=1000.0
+            )
+            controls, self.U = self.Sampling.update_control(cost_total, self.U, _state)            
+            
+            
+           
+        
         ## Evaluate costs on STATES with dimensions M x K x T x NX.
         ## Including the terminal costs in here is YOUR own responsibility!
-        cost_total = torch.nan_to_num(
-            self.Costs.forward(states, controls) + perturbation_cost, nan=1000.0
-        )
 
-        controls, self.U = self.Sampling.update_control(cost_total, self.U, _state)
         return controls

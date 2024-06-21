@@ -16,7 +16,7 @@ from ackermann_msgs.msg import AckermannDriveStamped
 from unstruct_navigation_ros.ros_converter import torch_tensor_to_ros, ros_to_torch_tensor
 # from unstruct_navigation_ros.scheduler import Scheduler
 from unstruct_navigation_ros.reload_rosparams import reload_rosparams
-from unstruct_navigation.utils import CameraPose, DataSet, create_dir, pickle_write, VehicleState, get_vehicle_state_and_action
+from unstruct_navigation.utils import CameraPose, DataSet, create_dir, pickle_write, VehicleState, get_vehicle_state_and_action, PredDynData, InandOutData
 from dynamic_reconfigure.server import Server
 from unstruct_navigation_ros.cfg import dynConfig
 import time
@@ -26,6 +26,7 @@ import pickle
 from unstruct_navigation.train import TrainDir
 from tf.transformations import euler_from_quaternion
 from nav_msgs.msg import Path
+import os 
 
 from geometry_msgs.msg import PoseStamped, Point
 from visualization_msgs.msg import Marker, MarkerArray
@@ -52,11 +53,17 @@ from unstruct_navigation_ros import ros_to_torch_tensor
 class UnstructPlanner:
     def __init__(self, node_name):
         # Read params
+        self.ctrl_loop_rate = 10
         self._node_name = node_name
         self.read_params()
         self.init_vars()        
         self.setup_models()
         self.setup_ros()
+
+        # self._logging_lock = Lock()
+        # self.logging_thread = Thread(target=self.logging_thread_loop, name="logging")
+        # self.logging_thread.start()
+        
         self.main_planning_loop()
 
         rospy.on_shutdown(self.shutdown_callback)
@@ -97,6 +104,8 @@ class UnstructPlanner:
             
         # self.tf_buffer = tf2_ros.Buffer(cache_time=rospy.Duration(30.0))
         # self.tf_listener = tf2_ros.TransformListener(self.tf_buffer)
+        self.logging_data = [] 
+        self.data_saving = False
         self.output_image_mode = 0
         self.paths_pub_enable = 0
         #tracking variables 
@@ -115,10 +124,11 @@ class UnstructPlanner:
         self.img_feats = None
         self.geo_feats = None
         self.grid_center = None
-
+        self.cur_action= None
 
         self.init_grid_msg = None
         self.feature_received = False
+        self.first_cmd_computed = False
 
     def setup_models(self):
         dir = TrainDir()
@@ -126,7 +136,6 @@ class UnstructPlanner:
             norm_dict = pickle.load(pickle_file)
         self.dynpred_model = DynPredModel(cfg= self._params.model.dyn_pred_cfg)        
         self.dynpred_model.set_normalizing_constatnt(norm_dict)
-
 
 
 
@@ -162,18 +171,49 @@ class UnstructPlanner:
         self.opt_path_pub = rospy.Publisher('opt_path_marker', MarkerArray, queue_size=2)            
 
 
-    def feature_callback(self,msg):
+    def feature_callback(self,msg):        
         # time_now = rospy.Time.now().to_sec() - msg.header.stamp.to_sec()
         # print('diff time = ' + str(time_now))
-        features_np = ros_to_torch_tensor(msg)        
-        (img_feats, geo_feats, grid_center) = features_np
+        features_torch = ros_to_torch_tensor(msg)        
+        (img_feats, geo_feats, grid_center) = features_torch
         self.feature_header = msg.header
+        # if torch.isnan(geo_feats).any():
+        #     assert False
+        geo_feats[torch.isnan(geo_feats)] = 0
         self.img_feats = img_feats
         self.geo_feats = geo_feats
         self.grid_center = grid_center
         if self.feature_received is False:
             self.feature_received = True
-       
+        
+        def debug_grid_and_img_features():
+            import numpy as np
+            import matplotlib.pyplot as plt
+            img_grid = torch.mean(self.img_feats,dim=0).cpu().numpy()
+            geo_grid = self.geo_feats[0,:,:].cpu().numpy()
+            plt.figure(figsize=(8, 8))
+            plt.imshow(img_grid, cmap='viridis')
+            plt.colorbar(label='Value')
+            plt.title('41x41 Grid Map')
+            plt.show()
+            plt.figure(figsize=(8, 8))
+            plt.imshow(geo_grid, cmap='viridis')
+            plt.colorbar(label='Value')
+            plt.title('41x41 Grid Map')
+            plt.show()
+            fig, axs = plt.subplots(1, 2, figsize=(16, 8))
+            im1 = axs[0].imshow(img_grid, cmap='viridis')
+            fig.colorbar(im1, ax=axs[0], orientation='vertical', label='Value')
+            axs[0].set_title('41x41 Image Grid Map')
+
+            # Plotting geo_grid
+            im2 = axs[1].imshow(geo_grid, cmap='viridis')
+            fig.colorbar(im2, ax=axs[1], orientation='vertical', label='Value')
+            axs[1].set_title('41x41 Geo Grid Map')
+
+            plt.show()
+    
+
     def goal_callback(self,msg:PoseStamped):
         if self.cur_odom is None: 
             return 
@@ -192,7 +232,10 @@ class UnstructPlanner:
         self.cur_cmd = msg
         
     def dyn_callback(self,config,level):  
-        self.logging_enable = config.logging_vehicle_states
+        self.logging_enable = config.logging_vehicle_states        
+        
+        self.planner.mppi.data_logging = self.logging_enable
+
         self.output_image_mode = config.output_image_mode
         self.paths_pub_enable = config.paths_pub_enable        
         return config
@@ -229,9 +272,6 @@ class UnstructPlanner:
         elev_map_cupy[5,:,:] = np.asarray(layers['traversability_step'])        
        
 
-
-    
-
     def send_ctrl(self, ctrl):
         control_msg = AckermannDriveStamped()
         control_msg.header.stamp = rospy.Time.now()
@@ -250,7 +290,7 @@ class UnstructPlanner:
         We can only set the rate using rosparam
         """
         
-        rate = rospy.Rate(10)      
+        rate = rospy.Rate(self.ctrl_loop_rate)      
         # Learning loop
         while True:
             # with self._logging_lock
@@ -258,55 +298,31 @@ class UnstructPlanner:
                 # odom_to_feature_time_diff = self.cur_odom.header.stamp.to_sec() - self.feature_header.stamp.to_sec()
                 # print("odom_to_feature_time_diff = " + str(odom_to_feature_time_diff))
                 # start_time = time.time()
-                self.planner.obtain_state(self.cur_odom, self.cur_imu)
-                # controls, states = self.planner.get_samples()
+                self.state_for_pred, self.init_del_xy = self.planner.obtain_states(self.cur_odom, self.cur_imu, self.grid_center)           
+                if self.dynpred_model is not None:
+                    self.dynpred_model.set_world_info(self.geo_feats.clone(), self.img_feats.clone())
+
                 ctrl = self.planner.update(self.goal_global, speed_limit = 1.5)
-                self.send_ctrl(ctrl)
-                # traj_markers = self.planner.get_publish_markers(self.planner.print_states)
+                self.cur_action = ctrl
+                
+
+                if self.logging_enable and self.data_saving is False:
+                    self.cur_data = PredDynData()
+                    self.cur_data.update_info(deepcopy(self.cur_odom), 
+                                            self.geo_feats.clone().cpu(), 
+                                            self.img_feats.clone().cpu(),
+                                            self.init_del_xy.clone().cpu(),
+                                            self.state_for_pred.clone().cpu(), 
+                                            torch.tensor(self.cur_action))  
+                    self.datalogging(self.cur_data)
                 
                 # traj_markers = self.planner.get_states_markers(states[:,:10,:,:])
                 # self.paths_pub.publish(traj_markers)
+                
+
+                
+                self.send_ctrl(ctrl)            
                 self.planner.mppi.reset()  
-
-
-                # cur_vehicle_state = VehicleState()                
-                # cur_vehicle_state.update_from_auc(self.cur_cmd, self.cur_odom)   
-                # state_, action_ = get_vehicle_state_and_action(cur_vehicle_state)                
-                # cliped_speed = np.max([cur_vehicle_state.odom.twist.twist.linear.x, 1e-1])                
-                # n_state, n_actions = self.dynpred_model.input_normalization(batch_state_.cuda(),batch_action_.cuda())
-                # return n_state.cuda(), n_actions.cuda(), xs_body_frame.cuda(), us_body_frame.cuda()
-                # return n_state.cuda(), n_actions.cuda()
-
-
-                #################################################  Action Samples  #################################################                
-#                 n_state, n_actions, xs_body_frame, us_body_frame = self.get_dyn_info()   
-#                 nominal_pred_pose_in_global = self.get_pred_pose_in_global(xs_body_frame, self.cur_odom)                             
-
-#                     #################################################  Dynamics prediction #################################################
-#                 pred_out = self.dynpred_model(init_del_xy, n_state, n_actions, self.cur_grid_torch, self.cur_grid_center_torch, img_features_grid)
-#                 pred_out = self.dynpred_model.output_standardize(pred_out)
-
-# #################################################  Cost Evaluation #################################################
-#                 goal = torch.tensor(self.goal_global).cuda()                
-#                 opt_min_index, opt_pred_state = self.cost_eval.geo_plan(self.init_grid_msg.info, self.cur_grid_torch, self.cur_grid_center_torch, nominal_pred_pose_in_global, goal)
-
-# #################################################  Control pub #################################################
-                
-#                 opt_local_traj = nominal_pred_pose_in_global[opt_min_index,:,:]                                            
-#                 self.pub_local_traj(opt_local_traj)
-
-
-#                 # marker_array_pub.publish(marker_array_msg)
-                
-#                 # path_msg = get_path_msg(nominal_pred_pose_in_global[opt_min_index,:2,:].permute(1,0))
-#                 if self.paths_pub_enable==1:
-#                     path_msg = self.get_path_marker(nominal_pred_pose_in_global[:,:,:],color = [0.0, 0.0, 1.0, 0.5])
-#                     self.paths_pub.publish(path_msg)
-
-                
-#                     opt_path_msg = self.get_path_marker(nominal_pred_pose_in_global[opt_min_index,:,:].unsqueeze(0),color = [1.0, 0.0, 0.0, 1.0])
-#                     self.opt_path_pub.publish(opt_path_msg)
-
 
                 # end_time = time.time()  # End timing
                 # elapsed_time = end_time - start_time
@@ -314,7 +330,61 @@ class UnstructPlanner:
             rate.sleep()
 
    
+
+    # def logging_thread_loop(self):
+        
+    #     """This implements the main thread that runs the training procedure
+    #     We can only set the rate using rosparam
+    #     """
+    #     # Set rate
+    #     rate = rospy.Rate(self.ctrl_loop_rate)
+    #     self.data_saving = False
+    #     # Learning loop
+    #     while True:
+    #         # with self._logging_lock
+    #         if self.logging_enable and self.cur_odom is not None and self.cur_action is not None:                
+    #             if self.data_saving is False:
+    #                 self.cur_data = PredDynData()
+    #                 self.cur_data.update_info(deepcopy(self.cur_odom), 
+    #                                         self.geo_feats.clone().cpu(), 
+    #                                         self.img_feats.clone().cpu(),
+    #                                         self.init_del_xy.clone().cpu(),
+    #                                         self.state_for_pred.clone().cpu(), 
+    #                                         torch.tensor(self.cur_action))         
+                
+    #                 self.datalogging(self.cur_data)
+                
+            
+    #         rate.sleep()
+
+    def datalogging(self,cur_data):                   
+        self.logging_data.append(cur_data.copy())           
+        self.save_buffer_length = self.ctrl_loop_rate*10  
+        if len(self.logging_data) > self.save_buffer_length:
+            self.save_buffer_in_thread()
       
+    def save_buffer_in_thread(self):
+        # Create a new thread to run the save_buffer function
+        t = Thread(target=self.save_buffer)
+        t.start()
+    
+    def clear_buffer(self):
+        if len(self.logging_data) > 0:
+            self.logging_data.clear()            
+        rospy.loginfo("states buffer has been cleaned")
+
+    def save_buffer(self):        
+        if len(self.logging_data) ==0:
+            return        
+        self.data_saving = True
+        rospy.loginfo("Save start ")
+        # real_data = DataSet(len(self.data), self.data.copy(),self.image_projector)        
+        real_data = InandOutData(len(self.logging_data), self.logging_data.copy())        
+        create_dir(path=self._ros_params.train_data_dir)        
+        pickle_write(real_data, os.path.join(self._ros_params.train_data_dir, str(rospy.Time.now().to_sec()) + '_'+ str(len(self.logging_data))+'.pkl'))
+        rospy.loginfo("states data saved")
+        self.clear_buffer()
+        self.data_saving = False
 
 
 if __name__ == "__main__":

@@ -110,6 +110,8 @@ class Up(nn.Module):
 class DynPredModel(nn.Module):    
     def __init__(self, cfg, training = False):
         super(DynPredModel, self).__init__()
+        self.device = torch.device("cuda")
+        self.dtype = torch.float32
         self.evidence_able = False
         self.training = training        
         self.input_grid_resolution = cfg.input_grid_resolution
@@ -121,6 +123,11 @@ class DynPredModel(nn.Module):
         self.img_feature_dim = cfg.img_feature_dim        
         self.geo_feature_dim = cfg.geo_feature_dim        
         self.output_dim = cfg.output_dim
+        self.half_map_length = self.input_grid_width*self.input_grid_resolution/2.0
+        
+        self.grid =  torch.zeros((self.geo_feature_dim, self.input_grid_width, self.input_grid_height), dtype=self.dtype, device=self.device)                
+        self.img_features_grid =  torch.zeros((self.geo_feature_dim, self.input_grid_width, self.input_grid_height), dtype=self.dtype, device=self.device)
+        self.init_del_xy = torch.tensor([0.0, 0.0], dtype=self.dtype, device=self.device)
         
         # self.distributed_train = cfg['distributed_train']
         # if self.distributed_train:
@@ -128,7 +135,7 @@ class DynPredModel(nn.Module):
         # else:
         self.gpu_id = 0    
         
-        self.grid_feature_dim = 12
+        self.latent_grid_feature_dim = 12
         self.dynamics_dim = self.input_state_dim+ self.input_action_dim
 
         
@@ -139,7 +146,7 @@ class DynPredModel(nn.Module):
             nn.LeakyReLU(),
             nn.Conv2d(in_channels=32, out_channels=16, kernel_size=3, stride=1, padding=1),     
             nn.LeakyReLU(),
-            nn.Conv2d(in_channels=16, out_channels=int(self.grid_feature_dim/2), kernel_size=3, stride=1, padding=1),
+            nn.Conv2d(in_channels=16, out_channels=int(self.latent_grid_feature_dim/2), kernel_size=3, stride=1, padding=1),
             nn.LeakyReLU()
         ).to(self.gpu_id)
 
@@ -149,14 +156,14 @@ class DynPredModel(nn.Module):
         self.geo_cov = nn.Sequential(
         nn.Conv2d(in_channels=self.geo_feature_dim, out_channels=6, kernel_size=3, stride=1, padding=1),
         nn.LeakyReLU(),  
-        nn.Conv2d(in_channels=6, out_channels=int(self.grid_feature_dim/2), kernel_size=3, stride=1, padding=1),     
+        nn.Conv2d(in_channels=6, out_channels=int(self.latent_grid_feature_dim/2), kernel_size=3, stride=1, padding=1),     
         nn.LeakyReLU(),
         ).to(self.gpu_id) 
         
         self.geo_conv_out_size = self._get_conv_out_size(self.geo_cov,self.input_grid_height,self.input_grid_width, input_channels= self.geo_feature_dim)        
         
         self.mergelayer = nn.Sequential(
-                nn.Linear(self.grid_feature_dim + self.dynamics_dim, 30),        
+                nn.Linear(self.latent_grid_feature_dim + self.dynamics_dim, 30),        
                 nn.LeakyReLU(),                                    
                 nn.Linear(30, 50),        
                 nn.LeakyReLU(),
@@ -170,6 +177,7 @@ class DynPredModel(nn.Module):
             self.evidence_layer = NormalInvGamma(11, self.output_dim).to(self.gpu_id)
         
         
+    
     def normalize(self,data, mean, std):        
         normalized_data = (data - mean) / std
         return normalized_data
@@ -220,16 +228,41 @@ class DynPredModel(nn.Module):
         conv_output = model(dummy_input)
         return conv_output.view(-1).size(0)
     
-    def forward(self,cur_odom, n_state, n_actions, grid, grid_center, img_features_grid):
-          
-        init_del_x = cur_odom.pose.pose.position.x - grid_center[0]
-        init_del_y = cur_odom.pose.pose.position.y - grid_center[1]
-        init_del_xy = torch.tensor([init_del_x, init_del_y]).cuda()
-    
 
-        grid[torch.isnan(grid)] = 0
-        half_map_length = self.input_grid_width*self.input_grid_resolution/2.0
+    @torch.jit.export
+    def set_world_info(self, grid, img_features_grid):
+        self.grid = grid        
+        self.img_features_grid = img_features_grid
+    
+    @torch.jit.export
+    def set_init_delxy(self, init_del_xy):
+        self.init_del_xy = init_del_xy
+     
+    @torch.jit.export
+    def set_vehicle_state(self, state):        
+        self.state = state
         
+    @torch.jit.export
+    def normalize_state(self, state):        
+        return self.normalize(state, self.norm_dict['states_mean'],self.norm_dict['states_std'])
+    
+    @torch.jit.export
+    def normalize_actions(self, actions):        
+        return self.normalize(actions, self.norm_dict['actions_mean'],self.norm_dict['actions_std'])
+
+
+
+    def forward(self, actions):
+        
+        n_actions = actions.squeeze()
+        B = n_actions.shape[0]
+        H = n_actions.shape[1]
+
+        grid = self.grid        
+        img_features_grid = self.img_features_grid
+        init_del_xy = self.init_del_xy        
+        n_state = self.state
+
         if self.training:
             img_refined_features = self.img_cov(img_features_grid)
             geo_refined_features = self.geo_cov(grid)
@@ -238,18 +271,41 @@ class DynPredModel(nn.Module):
             geo_refined_features = self.geo_cov(grid.unsqueeze(0))
         
         refined_features = torch.cat((img_refined_features, geo_refined_features), dim=1)
-        
+
+
+        def debug_latent_img_features():
+            import numpy as np
+            import matplotlib.pyplot as plt            
+            img_refined_features_plot = torch.mean(img_refined_features.squeeze().detach(),dim=0).cpu().numpy()
+            geo_refined_features_plot = torch.mean(geo_refined_features.squeeze().detach(),dim=0).cpu().numpy()            
+            refined_features_plot = torch.mean(refined_features.squeeze().detach(),dim=0).cpu().numpy()            
+            fig, axs = plt.subplots(1, 3, figsize=(24, 8))
+            # Plotting img_grid
+            im1 = axs[0].imshow(img_refined_features_plot, cmap='viridis')
+            fig.colorbar(im1, ax=axs[0], orientation='vertical', label='Value')
+            axs[0].set_title('41x41 Image latent Grid Map')
+
+            # Plotting geo_grid
+            im2 = axs[1].imshow(geo_refined_features_plot, cmap='viridis')
+            fig.colorbar(im2, ax=axs[1], orientation='vertical', label='Value')
+            axs[1].set_title('41x41 Geo latent Grid Map')
+
+            im3 = axs[2].imshow(refined_features_plot, cmap='viridis')
+            fig.colorbar(im3, ax=axs[2], orientation='vertical', label='Value')
+            axs[2].set_title('41x41 Latent Grid Map')
+            plt.show()
+            
+          
         ## inputs have batch                       
         if self.training:
-            pose_grid = init_del_xy.unsqueeze(1).unsqueeze(1)/half_map_length            
+            pose_grid = init_del_xy.unsqueeze(1).unsqueeze(1)/self.half_map_length            
             pose_features = F.grid_sample(refined_features, pose_grid,align_corners=True)                 
         else:            
-            pose_grid = init_del_xy.view(1,1,1,-1)/half_map_length            
+            pose_grid = init_del_xy.view(1,1,1,-1)/self.half_map_length            
             pose_features = F.grid_sample(refined_features, pose_grid,align_corners=True)                 
-            pose_features = pose_features.repeat(n_state.shape[0],1,1,1)
+            pose_features = pose_features.repeat(B,1,1,1)
             
-        
-        roll_dynamic_state = torch.hstack([n_state, n_actions[:,0,:]])        
+        roll_dynamic_state = torch.hstack([n_state.repeat(B,1), n_actions[:,0,:]])        
         merged_feature = torch.cat((pose_features.squeeze(),roll_dynamic_state),dim =1).to(torch.float32)
         merged_feature = self.mergelayer(merged_feature)
         if self.evidence_able:
@@ -259,18 +315,16 @@ class DynPredModel(nn.Module):
 
         roll_state_history = []
         roll_state_history.append(out)
-        ### TODO: 
-        ### TODO:  need to check the grid sampling for inference 
-        ### TODO: 
+       
         for i in range(1,self.n_time_step-1):
             roll_del_xy = out[:,:2]
             roll_n_state = out[:,2:]
             roll_actions = n_actions[:,i,:]    
             if self.training:        
-                roll_grid_xy = roll_del_xy.unsqueeze(1).unsqueeze(1)/half_map_length 
+                roll_grid_xy = roll_del_xy.unsqueeze(1).unsqueeze(1)/self.half_map_length 
                 roll_features = F.grid_sample(refined_features, roll_grid_xy,align_corners=True)                             
             else:
-                roll_grid_xy = roll_del_xy.unsqueeze(1).unsqueeze(0)/half_map_length            
+                roll_grid_xy = roll_del_xy.unsqueeze(1).unsqueeze(0)/self.half_map_length            
                 roll_features = F.grid_sample(refined_features, roll_grid_xy,align_corners=True).squeeze()                 
                 roll_features = roll_features.permute(1,0)                
 
@@ -284,10 +338,3 @@ class DynPredModel(nn.Module):
         
         return torch.stack(roll_state_history)
     
-#    output[i,:] = torch.tensor([del_x, del_y, vx,vy,vz, wx,wy,wz,roll,pitch,yaw])
-
-    
-    #  pose_x = init_del_xy[:,0]/half_map_length
-    #     pose_y = init_del_xy[:,1]/half_map_length        
-    #     pose_grid1 ,pose_grid2 = torch.meshgrid(pose_x,pose_y,indexing = 'ij')
-    #     pose_grid = torch.stack((pose_grid1 ,pose_grid2), 2)

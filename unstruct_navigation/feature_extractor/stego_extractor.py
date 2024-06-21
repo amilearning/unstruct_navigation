@@ -50,7 +50,10 @@ class FeatureExtractor:
             run_crf=kwargs.get("run_crf", False),
         )
 
-      
+    def dense_feature_extract(self, img, **kwargs):
+        edges, seg, center, dense_feat = self.compute_dense_feat(img, **kwargs)
+        return dense_feat
+
 
     def extract(self, img, **kwargs):
       
@@ -98,6 +101,7 @@ class FeatureExtractor:
 
         
         img_internal = img.clone()
+        
         self._extractor.inference(img_internal)
         seg = self._extractor.cluster_segments.to(self._device)
         # seg = torch.from_numpy(self._extractor.cluster_segments).to(self._device)
@@ -125,13 +129,21 @@ class FeatureExtractor:
             self._stego_features_already_computed_in_segmentation = False            
         else:
             img_internal = img.clone()            
-            
-        dense_feat = self._extractor.features
         
-
-
-
+        dense_feat = self._extractor.features
         return edges,seg, center, dense_feat
+
+
+
+
+    def compute_dense_feat(self,img, **kwargs):
+
+        img_internal = img.clone()
+        
+        self._extractor.compute_dense_features(img_internal)
+
+        dense_feat = self._extractor.features        
+        return None,None, None, dense_feat
 
         
     def compute_segments(self, img: torch.tensor, **kwargs):

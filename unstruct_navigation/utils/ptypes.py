@@ -244,6 +244,44 @@ class MultiModallData(PythonMsg):
     def get_pose(self):
         return np.array([self.vehicle_state.odom.pose.pose.position.x, self.vehicle_state.odom.pose.pose.position.y, self.vehicle_state.odom.pose.pose.position.z, self.vehicle_state.euler.yaw])        
 
+
+@dataclass
+class PredDynData(PythonMsg): 
+    '''
+    Complete AUC Input data 
+    '''       
+    header: Header = field(default=None) 
+    odom: Odometry = field(default=Odometry)
+    grid_features: torch.tensor = field(default = torch.tensor)     
+    img_features: torch.tensor = field(default = torch.tensor)     
+    init_del_xy: torch.tensor = field(default = torch.tensor)     
+    state: torch.tensor = field(default = torch.tensor)     
+    cur_action: torch.tensor = field(default = torch.tensor)     
+    
+    def update_info(self, odom:Odometry, 
+                    grid_features:torch.tensor, 
+                    img_features:torch.tensor, 
+                    init_del_xy:torch.tensor, 
+                    state:torch.tensor,                     
+                    cur_action: torch.tensor):        
+        self.header = odom.header         
+        self.odom = odom
+        self.grid_features = grid_features
+        self.img_features = img_features
+        self.init_del_xy = init_del_xy
+        self.state = state
+        self.cur_action = cur_action
+
+    
+    # def get_pose(self):
+    #     return np.array([self.vehicle_state.odom.pose.pose.position.x, self.vehicle_state.odom.pose.pose.position.y, self.vehicle_state.odom.pose.pose.position.z, self.vehicle_state.euler.yaw])        
+
+
+@dataclass
+class InandOutData():    
+    N: int
+    items: List[PredDynData]    
+
 @dataclass
 class DataSet():    
     N: int

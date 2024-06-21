@@ -40,7 +40,7 @@ from std_msgs.msg import ColorRGBA
 from geometry_msgs.msg import Point
 import tf
 import cv2
-from gazebo_msgs.msg import ModelState, ModelStates
+
 
 
 

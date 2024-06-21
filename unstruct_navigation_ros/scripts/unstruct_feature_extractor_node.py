@@ -82,6 +82,7 @@ class WvnFeatureExtractor:
         self.paths_pub_enable = 0
         #tracking variables 
         self.logging_enable = False
+        self.data_saving = False
         self.msg_update_lock = Lock()
         self.plan_lock = Lock()
         self.data = []
@@ -319,7 +320,7 @@ class WvnFeatureExtractor:
             self.feature_pub = rospy.Publisher(
                 "unstruct_features",
                 Features,
-                queue_size=1,
+                queue_size=5,
             )
 
 
@@ -583,10 +584,10 @@ class WvnFeatureExtractor:
             # Update model from file if possible
             # self.load_model(image_msg.header.stamp)
             
-            image_diff_time = rospy.get_time() - image_msg.header.stamp.to_sec()
-            image_to_odom_diff_time = self.cur_odom.header.stamp.to_sec()- image_msg.header.stamp.to_sec()
-            print('image_diff_time = '+ str(image_diff_time))
-            print('image_to_odom_diff_time = '+ str(image_to_odom_diff_time))
+            # image_diff_time = rospy.get_time() - image_msg.header.stamp.to_sec()
+            # image_to_odom_diff_time = self.cur_odom.header.stamp.to_sec()- image_msg.header.stamp.to_sec()
+            # print('image_diff_time = '+ str(image_diff_time))
+            # print('image_to_odom_diff_time = '+ str(image_to_odom_diff_time))
 
 #################################################  Feature Preprocessing  #################################################                
             # Convert image message to torch image
@@ -610,7 +611,7 @@ class WvnFeatureExtractor:
                 valid_corresp = torch.as_tensor(valid_corresp).cuda()
                 
                 # Image Feature Extraction 
-                _, feat, seg, center, dense_feat = self._feature_extractor.extract(
+                dense_feat = self._feature_extractor.dense_feature_extract(
                     img=torch_image[None],
                     return_centers=False,
                     return_dense_features=True,

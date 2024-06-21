@@ -73,6 +73,17 @@ class StegoInterface:
         self._model.to(device)
         self._device = device
 
+
+    @torch.no_grad()
+    def compute_dense_features(self, img: torch.tensor):
+  
+        resized_img = self._transform(img).to(self._device)
+
+        self._code = self._model.get_code(resized_img)
+        B, D, H, W = resized_img.shape
+        new_features_size = (H, W)        
+        self._code = F.interpolate(self._code, new_features_size, mode="bilinear", align_corners=True)
+
     @torch.no_grad()
     def inference(self, img: torch.tensor):
         """Performance inference using stego
